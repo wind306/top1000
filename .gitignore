@@ -51,3 +51,4 @@ main
 .env.local
 .env.production
 web/dist
+**/.omc

@@ -24,6 +24,30 @@ const (
 	defaultAPITimeout    = 15 * time.Second
 )
 
+// Go 1.26: 创建HTTP客户端的辅助函数，避免重复代码
+// 这个SB函数根据context和配置创建合适的HTTP客户端
+func createHTTPClient(ctx context.Context, timeout time.Duration) *http.Client {
+	cfg := config.Get()
+
+	// 根据context的deadline调整超时
+	actualTimeout := timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+			actualTimeout = remaining
+		}
+	}
+
+	client := &http.Client{Timeout: actualTimeout}
+
+	if cfg.InsecureSkipVerify {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
+
+	return client
+}
+
 // Handler API 处理器（依赖注入模式）
 type Handler struct {
 	store      storage.DataStore
@@ -75,20 +99,15 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 // @Failure 500 {object} map[string]string "error": "无法加载数据"
 // @Router /top1000.json [get]
 func (h *Handler) GetTop1000Data(c *fiber.Ctx) error {
-	// 从Fiber的context提取标准的context.Context
-	// 设置超时保护（如果客户端没设置超时）
 	ctx, cancel := context.WithTimeout(c.Context(), defaultAPITimeout)
 	defer cancel()
 
-	// 检查数据是否需要更新
 	if h.shouldUpdateData(ctx) {
 		if err := h.refreshData(ctx); err != nil {
 			log.Printf("[%s] 刷新数据失败: %v", dataUpdateLogPrefix, err)
-			// 容错：继续尝试读取旧数据
 		}
 	}
 
-	// 从存储读取数据并返回（传递context）
 	data, err := h.store.LoadData(ctx)
 	if err != nil {
 		log.Printf("[%s] 加载数据失败: %v", dataUpdateLogPrefix, err)
@@ -164,26 +183,21 @@ func (h *Handler) refreshData(ctx context.Context) error {
 func (h *Handler) GetSitesData(c *fiber.Ctx) error {
 	cfg := config.Get()
 
-	// 检查是否配置了IYUU_SIGN
 	if cfg.IYYUSign == "" {
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": "未配置IYUU_SIGN环境变量",
 		})
 	}
 
-	// 从Fiber的context提取标准的context.Context
 	ctx, cancel := context.WithTimeout(c.Context(), defaultAPITimeout)
 	defer cancel()
 
-	// 检查数据是否存在，不存在或正在更新时触发更新
 	if h.shouldUpdateSitesData(ctx) {
 		if err := h.refreshSitesData(ctx, cfg.IYYUSign); err != nil {
 			log.Printf("[%s] 刷新站点数据失败: %v", sitesUpdateLogPrefix, err)
-			// 容错：继续尝试读取旧数据
 		}
 	}
 
-	// 从存储读取数据并返回
 	data, err := h.sitesStore.LoadSitesData(ctx)
 	if err != nil {
 		log.Printf("[%s] 加载站点数据失败: %v", sitesUpdateLogPrefix, err)
@@ -192,9 +206,8 @@ func (h *Handler) GetSitesData(c *fiber.Ctx) error {
 		})
 	}
 
-	// 设置响应头
 	c.Set("Content-Type", "application/json; charset=utf-8")
-	c.Set("Cache-Control", "public, max-age=3600") // 缓存1小时
+	c.Set("Cache-Control", "public, max-age=3600")
 
 	return c.JSON(data)
 }
@@ -207,6 +220,7 @@ func (h *Handler) shouldUpdateSitesData(ctx context.Context) bool {
 
 // refreshSitesData 刷新站点数据（带容错机制）
 // 返回 error 让调用者知道刷新是否成功
+// Go 1.26: 使用 createHTTPClient 辅助函数，DRY原则落地
 func (h *Handler) refreshSitesData(ctx context.Context, sign string) error {
 	// 防止并发更新
 	if h.lock.IsSitesUpdating() {
@@ -230,20 +244,8 @@ func (h *Handler) refreshSitesData(ctx context.Context, sign string) error {
 	params.Add("version", "2.0.0")
 	apiURL.RawQuery = params.Encode()
 
-	timeout := 5 * time.Second
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
-			timeout = remaining
-		}
-	}
-
-	client := &http.Client{Timeout: timeout}
-	cfg := config.Get()
-	if cfg.InsecureSkipVerify {
-		client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
-	}
+	// Go 1.26: 使用辅助函数创建HTTP客户端
+	client := createHTTPClient(ctx, 5*time.Second)
 
 	resp, err := client.Get(apiURL.String())
 	if err != nil {
@@ -252,7 +254,7 @@ func (h *Handler) refreshSitesData(ctx context.Context, sign string) error {
 	}
 	defer resp.Body.Close()
 
-	// 读取响应体
+	// Go 1.26: io.ReadAll 性能已优化，分配更少内存
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("[%s] 读取响应失败: %v", sitesUpdateLogPrefix, err)

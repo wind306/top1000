@@ -10,6 +10,24 @@ import (
 	"time"
 )
 
+// Go 1.26: 泛型环境变量解析器类型
+type envParser[T any] func(string) (T, bool)
+
+// Go 1.26: 通用泛型环境变量解析函数
+// 这个SB函数避免了重复代码，DRY原则落地
+func getEnvGeneric[T any](key string, defaultValue T, parser envParser[T]) T {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+
+	result, ok := parser(value)
+	if !ok {
+		return defaultValue
+	}
+	return result
+}
+
 // 默认值常量
 const (
 	DefaultPort         = "7066"
@@ -37,14 +55,22 @@ var (
 )
 
 // Load 加载配置（单例模式，并发安全）
+// Go 1.26: 使用泛型环境变量解析，DRY原则贯彻到底
 func Load() *Config {
 	initOnce.Do(func() {
 		cfg := &Config{
 			RedisAddr:          getEnv("REDIS_ADDR", ""),
 			RedisPassword:      getEnv("REDIS_PASSWORD", ""),
-			RedisDB:            getEnvInt("REDIS_DB", DefaultRedisDB),
-			IYYUSign:           getEnv("IYUU_SIGN", ""),
-			InsecureSkipVerify: getEnvBool("INSECURE_SKIP_VERIFY", false),
+			// Go 1.26 泛型优化：使用统一的 getEnvGeneric
+			RedisDB:            getEnvGeneric("REDIS_DB", DefaultRedisDB, func(s string) (int, bool) {
+				i, err := strconv.Atoi(s)
+				return i, err == nil
+			}),
+			IYYUSign: getEnv("IYUU_SIGN", ""),
+			InsecureSkipVerify: getEnvGeneric("INSECURE_SKIP_VERIFY", false, func(s string) (bool, bool) {
+				// 支持 true/false, 1/0, yes/no
+				return s == "true" || s == "1" || s == "yes", true
+			}),
 		}
 		appConfig.Store(cfg)
 	})
@@ -100,28 +126,4 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
-}
-
-// getEnvInt 获取整数环境变量，如果不存在或解析失败则返回默认值
-func getEnvInt(key string, defaultValue int) int {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
-	}
-
-	result, err := strconv.Atoi(value)
-	if err == nil {
-		return result
-	}
-	return defaultValue
-}
-
-// getEnvBool 获取布尔环境变量，如果不存在或解析失败则返回默认值
-func getEnvBool(key string, defaultValue bool) bool {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
-	}
-	// 支持 true/false, 1/0, yes/no
-	return value == "true" || value == "1" || value == "yes"
 }

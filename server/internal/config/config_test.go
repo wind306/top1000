@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -250,7 +251,8 @@ func TestGetEnv(t *testing.T) {
 	}
 }
 
-func TestGetEnvInt(t *testing.T) {
+// TestGetEnvGeneric 测试泛型环境变量解析函数（Go 1.26）
+func TestGetEnvGeneric(t *testing.T) {
 	tests := []struct {
 		name         string
 		key          string
@@ -292,8 +294,13 @@ func TestGetEnvInt(t *testing.T) {
 			cleanup := tt.setup()
 			defer cleanup()
 
-			if got := getEnvInt(tt.key, tt.defaultValue); got != tt.want {
-				t.Errorf("getEnvInt() = %v, want %v", got, tt.want)
+			// Go 1.26: 使用泛型函数 getEnvGeneric
+			parser := func(s string) (int, bool) {
+				i, err := strconv.Atoi(s)
+				return i, err == nil
+			}
+			if got := getEnvGeneric(tt.key, tt.defaultValue, parser); got != tt.want {
+				t.Errorf("getEnvGeneric() = %v, want %v", got, tt.want)
 			}
 		})
 	}

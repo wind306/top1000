@@ -29,5 +29,6 @@ func main() {
 
 	log.Println("[main] 环境变量已加载")
 
-	server.Start()
+	// 使用兼容性启动函数（自动处理 context 和优雅关闭）
+	server.StartCompat()
 }

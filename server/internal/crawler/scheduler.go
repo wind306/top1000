@@ -2,6 +2,8 @@ package crawler
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -32,7 +34,29 @@ const (
 var (
 	siteRegex = regexp.MustCompile(sitePattern)
 	taskMutex sync.Mutex
+	// Go 1.26: 哨兵错误，用于 errors.Is 检查
+	ErrFetchingCancelled = errors.New("爬取被取消")
+	ErrTaskRunning       = errors.New("任务正在执行中")
 )
+
+// Go 1.26: 创建HTTP客户端的辅助函数
+func createHTTPClient(ctx context.Context, cfg *config.Config) *http.Client {
+	timeout := httpTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+			timeout = remaining
+		}
+	}
+
+	client := &http.Client{Timeout: timeout}
+	if cfg.InsecureSkipVerify {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
+
+	return client
+}
 
 // FetchTop1000 从IYUU获取数据并返回
 func FetchTop1000() (*model.ProcessedData, error) {
@@ -42,28 +66,26 @@ func FetchTop1000() (*model.ProcessedData, error) {
 }
 
 // FetchTop1000WithContext 从IYUU获取数据并返回
+// Go 1.26: 使用哨兵错误，方便 errors.Is 检查
 func FetchTop1000WithContext(ctx context.Context) (*model.ProcessedData, error) {
 	if !taskMutex.TryLock() {
-		return nil, fmt.Errorf("任务正在执行中")
+		return nil, ErrTaskRunning
 	}
 	defer taskMutex.Unlock()
 
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		// 检查 context 是否已取消
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
+			return nil, fmt.Errorf("%w: %v", ErrFetchingCancelled, ctx.Err())
 		}
 
 		if attempt > 0 {
 			log.Printf("[%s] 第 %d 次重试...", logPrefix, attempt)
 
-			// 使用 select 等待，支持 context 取消
 			select {
 			case <-ctx.Done():
-				return nil, fmt.Errorf("重试期间请求被取消: %w", ctx.Err())
+				return nil, fmt.Errorf("%w: %v", ErrFetchingCancelled, ctx.Err())
 			case <-time.After(retryInterval):
-				// 继续重试
 			}
 		}
 
@@ -79,6 +101,7 @@ func FetchTop1000WithContext(ctx context.Context) (*model.ProcessedData, error) 
 }
 
 // doFetchWithContext 执行HTTP请求获取数据
+// Go 1.26: 使用 createHTTPClient 辅助函数，io.ReadAll 性能已优化
 func doFetchWithContext(ctx context.Context) (*model.ProcessedData, error) {
 	log.Printf("[%s] 开始爬取IYUU数据...", logPrefix)
 
@@ -87,7 +110,9 @@ func doFetchWithContext(ctx context.Context) (*model.ProcessedData, error) {
 		return nil, fmt.Errorf("创建HTTP请求失败: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	// Go 1.26: 使用辅助函数创建HTTP客户端，传递正确的超时参数
+	client := createHTTPClient(ctx, config.Get())
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("获取数据失败: %w", err)
 	}
@@ -97,6 +122,7 @@ func doFetchWithContext(ctx context.Context) (*model.ProcessedData, error) {
 		return nil, fmt.Errorf("API返回错误状态码: %d", resp.StatusCode)
 	}
 
+	// Go 1.26: io.ReadAll 性能已优化（约2倍速度，一半内存分配）
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("读取响应体失败: %w", err)
@@ -228,7 +254,8 @@ func PreloadData() {
 		return
 	}
 
-	if err := storage.SaveDataWithContext(ctx, *data); err != nil {
+	store := storage.GetDefaultStore()
+	if err := store.SaveData(ctx, *data); err != nil {
 		log.Printf("[爬虫] 保存预加载数据失败: %v", err)
 		return
 	}
@@ -238,7 +265,8 @@ func PreloadData() {
 
 // checkDataLoadRequired 检查是否需要加载数据
 func checkDataLoadRequired(ctx context.Context) bool {
-	exists, err := storage.DataExistsWithContext(ctx)
+	store := storage.GetDefaultStore()
+	exists, err := store.DataExists(ctx)
 	if err != nil || !exists {
 		if err != nil {
 			log.Printf("[爬虫] 检查数据存在性失败: %v", err)
@@ -246,7 +274,7 @@ func checkDataLoadRequired(ctx context.Context) bool {
 		return true
 	}
 
-	isExpired, err := storage.IsDataExpiredWithContext(ctx)
+	isExpired, err := store.IsDataExpired(ctx)
 	if err != nil {
 		log.Printf("[爬虫] 检查数据过期失败: %v", err)
 		return true

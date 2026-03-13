@@ -9,7 +9,7 @@
 # ============================================
 
 # 阶段一：构建 service (Go版本)
-FROM golang:1.25-alpine AS service-builder
+FROM golang:1.26-alpine AS service-builder
 WORKDIR /app
 
 LABEL stage="service-builder"

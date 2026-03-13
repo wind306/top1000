@@ -72,14 +72,14 @@ func (r *RedisStore) LoadData(ctx context.Context) (*model.ProcessedData, error)
 	jsonData, err := r.client.Get(ctx, key).Bytes()
 	if err != nil {
 		if err == redis.Nil {
-			return nil, fmt.Errorf("数据不存在")
+			return nil, fmt.Errorf("%s", errDataNotFound)
 		}
-		return nil, fmt.Errorf("从Redis读取数据失败: %w", err)
+		return nil, fmt.Errorf("%s: %w", errRedisReadFailed, err)
 	}
 
 	var data model.ProcessedData
 	if err := json.Unmarshal(jsonData, &data); err != nil {
-		return nil, fmt.Errorf("解析JSON失败: %w", err)
+		return nil, fmt.Errorf("%s: %w", errJSONUnmarshalFailed, err)
 	}
 
 	log.Printf("从Redis加载数据成功（共 %d 条记录）", len(data.Items))
@@ -90,19 +90,19 @@ func (r *RedisStore) LoadData(ctx context.Context) (*model.ProcessedData, error)
 func (r *RedisStore) SaveData(ctx context.Context, data model.ProcessedData) error {
 	if err := data.Validate(); err != nil {
 		log.Printf("数据验证失败，拒绝保存: %v", err)
-		return fmt.Errorf("数据验证失败: %w", err)
+		return fmt.Errorf("%s: %w", errDataInvalid, err)
 	}
 
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		return fmt.Errorf("序列化数据失败: %w", err)
+		return fmt.Errorf("%s: %w", errJSONMarshalFailed, err)
 	}
 
 	key := config.DefaultRedisKey
 	// 不设置TTL，数据永久存储
 	if err := r.client.Set(ctx, key, jsonData, 0).Err(); err != nil {
 		log.Printf("保存数据到Redis失败: %v", err)
-		return fmt.Errorf("保存数据到Redis失败: %w", err)
+		return fmt.Errorf("%s: %w", errRedisSaveFailed, err)
 	}
 
 	log.Printf("数据已保存到Redis（永久存储，过期判断基于数据time字段）")
@@ -115,7 +115,7 @@ func (r *RedisStore) DataExists(ctx context.Context) (bool, error) {
 
 	exists, err := r.client.Exists(ctx, key).Result()
 	if err != nil {
-		return false, fmt.Errorf("检查数据存在性失败: %w", err)
+		return false, fmt.Errorf("%s: %w", errCheckExistsFailed, err)
 	}
 
 	return exists > 0, nil
@@ -157,14 +157,14 @@ func (r *RedisStore) LoadSitesData(ctx context.Context) (any, error) {
 	jsonData, err := r.client.Get(ctx, key).Bytes()
 	if err != nil {
 		if err == redis.Nil {
-			return nil, fmt.Errorf("站点数据不存在")
+			return nil, fmt.Errorf("%s", errSitesNotFound)
 		}
-		return nil, fmt.Errorf("从Redis读取站点数据失败: %w", err)
+		return nil, fmt.Errorf("%s: %w", errRedisReadFailed, err)
 	}
 
 	var result any
 	if err := json.Unmarshal(jsonData, &result); err != nil {
-		return nil, fmt.Errorf("解析站点数据JSON失败: %w", err)
+		return nil, fmt.Errorf("%s: %w", errJSONUnmarshalFailed, err)
 	}
 
 	log.Printf("从Redis加载站点数据成功")
@@ -175,7 +175,7 @@ func (r *RedisStore) LoadSitesData(ctx context.Context) (any, error) {
 func (r *RedisStore) SaveSitesData(ctx context.Context, data any) error {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		return fmt.Errorf("序列化站点数据失败: %w", err)
+		return fmt.Errorf("%s: %w", errJSONMarshalFailed, err)
 	}
 
 	key := config.DefaultSitesKey
@@ -183,7 +183,7 @@ func (r *RedisStore) SaveSitesData(ctx context.Context, data any) error {
 	ttl := config.DefaultSitesExpire
 	if err := r.client.Set(ctx, key, jsonData, ttl).Err(); err != nil {
 		log.Printf("保存站点数据到Redis失败: %v", err)
-		return fmt.Errorf("保存站点数据到Redis失败: %w", err)
+		return fmt.Errorf("%s: %w", errRedisSaveFailed, err)
 	}
 
 	log.Printf("站点数据已保存到Redis（TTL: %v）", ttl)
@@ -196,7 +196,7 @@ func (r *RedisStore) SitesDataExists(ctx context.Context) (bool, error) {
 
 	exists, err := r.client.Exists(ctx, key).Result()
 	if err != nil {
-		return false, fmt.Errorf("检查站点数据存在性失败: %w", err)
+		return false, fmt.Errorf("%s: %w", errCheckExistsFailed, err)
 	}
 
 	return exists > 0, nil
