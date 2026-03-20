@@ -1,6 +1,7 @@
 package model
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -130,6 +131,17 @@ func TestSiteItem_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "百分比重复度(允许)",
+			item: SiteItem{
+				SiteName:    "测试站点",
+				SiteID:      "123",
+				Duplication: "85.5%",
+				Size:        "1.2TB",
+				ID:          1,
+			},
+			wantErr: false,
+		},
+		{
 			name: "空大小(允许)",
 			item: SiteItem{
 				SiteName:    "测试站点",
@@ -172,7 +184,7 @@ func TestSiteItem_Validate(t *testing.T) {
 				return
 			}
 			if err != nil && tt.errMsg != "" {
-				if err.Error() != tt.errMsg && !contains(err.Error(), tt.errMsg) {
+				if err.Error() != tt.errMsg && !strings.Contains(err.Error(), tt.errMsg) {
 					t.Errorf("SiteItem.Validate() error = %v, 期望包含 %v", err, tt.errMsg)
 				}
 			}
@@ -315,23 +327,10 @@ func TestProcessedData_Validate(t *testing.T) {
 				return
 			}
 			if err != nil && tt.errMsg != "" {
-				if err.Error() != tt.errMsg && !contains(err.Error(), tt.errMsg) {
+				if err.Error() != tt.errMsg && !strings.Contains(err.Error(), tt.errMsg) {
 					t.Errorf("ProcessedData.Validate() error = %v, 期望包含 %v", err, tt.errMsg)
 				}
 			}
 		})
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && findSubstring(s, substr))
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

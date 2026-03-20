@@ -56,7 +56,8 @@ func (s *SiteItem) Validate() error {
 	}
 
 	if s.Duplication != "" {
-		if _, err := strconv.ParseFloat(s.Duplication, 64); err != nil {
+		duplication := strings.TrimSpace(strings.TrimSuffix(s.Duplication, "%"))
+		if _, err := strconv.ParseFloat(duplication, 64); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %s", errDuplicationInvalid, s.Duplication))
 		}
 	}
