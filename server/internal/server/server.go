@@ -18,8 +18,6 @@ import (
 	"top1000/internal/crawler"
 	"top1000/internal/storage"
 
-	docs "top1000/docs" // Swagger docs
-
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/recover"
@@ -38,6 +36,7 @@ const (
 // Server 服务器结构体（保持状态，方便测试和优雅关闭）
 type Server struct {
 	app         *fiber.App
+	store       *storage.RedisStore
 	cfg         *config.Config
 	shutdownCtx context.Context
 	cancel      context.CancelFunc
@@ -65,20 +64,25 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("配置验证失败: %w", err)
 	}
 
-	printSeparator()
+	separator := strings.Repeat("=", separatorLength)
+	log.Println(separator)
 	log.Println("   Top1000 服务正在启动...")
-	printSeparator()
+	log.Println(separator)
 
-	// 初始化存储
-	if err := s.initStorage(); err != nil {
+	log.Println("正在初始化Redis连接...")
+	store, err := storage.InitRedis()
+	if err != nil {
 		return fmt.Errorf("Redis初始化失败: %w", err)
 	}
+	s.store = store
+	log.Println("Redis初始化成功")
 
 	// 创建应用
 	s.app = s.createApp()
 
-	// 预加载数据
-	s.preloadData()
+	log.Println(separator)
+	crawler.PreloadData(store)
+	log.Println(separator)
 
 	// 打印启动信息
 	s.printStartupInfo()
@@ -128,8 +132,12 @@ func (s *Server) shutdownWithTimeout(ctx context.Context) error {
 		}
 	}
 
-	// 关闭 Redis 连接
-	s.closeRedis()
+	log.Println("正在关闭Redis连接...")
+	if err := storage.CloseRedis(); err != nil {
+		log.Printf("关闭Redis连接失败: %v", err)
+		return err
+	}
+	log.Println("Redis连接已关闭")
 
 	log.Println("服务已安全关闭")
 	return nil
@@ -163,11 +171,11 @@ func (s *Server) waitForShutdown(ctx context.Context) error {
 // createApp 创建Fiber应用并配置中间件和路由
 func (s *Server) createApp() *fiber.App {
 	app := fiber.New(fiber.Config{
-		AppName:      appName,
+		AppName:       appName,
 		StrictRouting: true,
-		BodyLimit:    requestBodyLimit,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		BodyLimit:     requestBodyLimit,
+		ReadTimeout:   10 * time.Second,
+		WriteTimeout:  10 * time.Second,
 		// 错误处理自定义
 		ErrorHandler: customErrorHandler,
 	})
@@ -244,15 +252,12 @@ func securityHeadersMiddleware() fiber.Handler {
 // setupRoutes 配置路由
 func (s *Server) setupRoutes(app *fiber.App) {
 	handler := api.NewHandler(
-		storage.GetDefaultStore(),
-		storage.GetDefaultSitesStore(),
-		storage.GetDefaultLock(),
+		s.store,
+		s.store,
+		s.store,
 	)
 
 	handler.RegisterRoutes(app)
-
-	app.Get("/swagger/*", swaggerUI)
-	app.Get("/swagger/doc.json", swaggerJSON)
 
 	app.Static("/", config.DefaultWebDistDir, fiber.Static{
 		CacheDuration:  0,
@@ -260,55 +265,6 @@ func (s *Server) setupRoutes(app *fiber.App) {
 		MaxAge:         0,
 		ModifyResponse: setCacheHeaders,
 	})
-}
-
-// swaggerUI 返回 Swagger UI HTML（使用模板）
-func swaggerUI(c *fiber.Ctx) error {
-	html := `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>Top1000 API Documentation</title>
-    <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css">
-    <style>
-        html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }
-        *, *:before, *:after { box-sizing: inherit; }
-        body { margin: 0; padding: 0; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; }
-    </style>
-</head>
-<body>
-    <div id="swagger-ui"></div>
-    <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js" charset="UTF-8"></script>
-    <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-standalone-preset.js" charset="UTF-8"></script>
-    <script>
-        window.onload = function() {
-            const ui = SwaggerUIBundle({
-                url: "/swagger/doc.json",
-                dom_id: '#swagger-ui',
-                deepLinking: true,
-                presets: [
-                    SwaggerUIBundle.presets.apis,
-                    SwaggerUIStandalonePreset
-                ],
-                plugins: [
-                    SwaggerUIBundle.plugins.DownloadUrl
-                ],
-                layout: "StandaloneLayout"
-            })
-            window.ui = ui
-        }
-    </script>
-</body>
-</html>`
-	c.Set("Content-Type", "text/html; charset=utf-8")
-	c.Set("Cache-Control", noCache)
-	return c.Send([]byte(html))
-}
-
-// swaggerJSON 返回 Swagger JSON 文档
-func swaggerJSON(c *fiber.Ctx) error {
-	c.Set("Cache-Control", "public, max-age=3600")
-	return c.JSON(docs.SwaggerInfo)
 }
 
 // setCacheHeaders 设置静态文件缓存头
@@ -328,58 +284,14 @@ func setCacheHeaders(c *fiber.Ctx) error {
 	return nil
 }
 
-// initStorage 初始化Redis连接
-func (s *Server) initStorage() error {
-	log.Println("正在初始化Redis连接...")
-	if err := storage.InitRedis(); err != nil {
-		return err
-	}
-	log.Println("Redis初始化成功")
-	return nil
-}
-
-// closeRedis 关闭Redis连接
-func (s *Server) closeRedis() {
-	log.Println("正在关闭Redis连接...")
-	if err := storage.CloseRedis(); err != nil {
-		log.Printf("关闭Redis连接失败: %v", err)
-	} else {
-		log.Println("Redis连接已关闭")
-	}
-}
-
-// printSeparator 打印分隔线
-func printSeparator() {
-	log.Println(strings.Repeat("=", separatorLength))
-}
-
 // printStartupInfo 打印启动信息
 func (s *Server) printStartupInfo() {
-	printSeparator()
+	separator := strings.Repeat("=", separatorLength)
+	log.Println(separator)
 	log.Printf("服务已启动，监听端口: %s", config.DefaultPort)
 	log.Printf("存储方式: Redis (%s)", s.cfg.RedisAddr)
 	log.Println("数据更新策略: 过期自动更新（容错机制）")
 	log.Println("安全措施: 速率限制、安全响应头")
 	log.Println("优雅关闭: 已启用（SIGINT/SIGTERM）")
-	printSeparator()
-}
-
-// preloadData 启动时预加载数据
-func (s *Server) preloadData() {
-	printSeparator()
-	crawler.PreloadData()
-	printSeparator()
-}
-
-// ===== 以下为兼容性函数（保持向后兼容） =====
-
-// StartCompat 启动服务器的兼容性函数（使用 context.Background）
-// 这个函数保持原有签名，方便不关心 context 的调用者
-func StartCompat() {
-	srv := New()
-	ctx := context.Background()
-
-	if err := srv.Start(ctx); err != nil {
-		log.Fatalf("服务启动失败: %v", err)
-	}
+	log.Println(separator)
 }
