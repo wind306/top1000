@@ -10,14 +10,11 @@ import (
 )
 
 var (
-	defaultStore      DataStore
-	defaultSitesStore SitesStore
-	defaultLock       UpdateLock
-	redisClient       *redis.Client
+	redisClient *redis.Client
 )
 
 // InitRedis 初始化 Redis 连接
-func InitRedis() error {
+func InitRedis() (*RedisStore, error) {
 	cfg := config.Get()
 	log.Printf("正在连接Redis: %s (DB: %d)", cfg.RedisAddr, cfg.RedisDB)
 
@@ -37,16 +34,13 @@ func InitRedis() error {
 
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		log.Printf("Redis连接失败: %v", err)
-		return fmt.Errorf("Redis连接失败: %w", err)
+		return nil, fmt.Errorf("Redis连接失败: %w", err)
 	}
 
-	redisStore := NewRedisStore(redisClient)
-	defaultStore = redisStore.AsDataStore()
-	defaultSitesStore = redisStore.AsSitesStore()
-	defaultLock = redisStore.AsUpdateLock()
+	store := NewRedisStore(redisClient)
 
 	log.Println("Redis连接成功")
-	return nil
+	return store, nil
 }
 
 // CloseRedis 关闭 Redis 连接
@@ -55,19 +49,4 @@ func CloseRedis() error {
 		return redisClient.Close()
 	}
 	return nil
-}
-
-// GetDefaultStore 获取默认数据存储实例
-func GetDefaultStore() DataStore {
-	return defaultStore
-}
-
-// GetDefaultSitesStore 获取默认站点存储实例
-func GetDefaultSitesStore() SitesStore {
-	return defaultSitesStore
-}
-
-// GetDefaultLock 获取默认更新锁实例
-func GetDefaultLock() UpdateLock {
-	return defaultLock
 }

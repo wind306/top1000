@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 	"top1000/internal/config"
@@ -16,15 +17,20 @@ func TestInitRedis(t *testing.T) {
 		mr := miniredis.RunT(t)
 		defer mr.Close()
 
-		redisClient = redis.NewClient(&redis.Options{
-			Addr: mr.Addr(),
-		})
+		t.Setenv("REDIS_ADDR", mr.Addr())
+		t.Setenv("REDIS_PASSWORD", "")
+		t.Setenv("REDIS_DB", "0")
 
-		if redisClient == nil {
-			t.Error("redisClient 未初始化")
+		store, err := InitRedis()
+		if err != nil {
+			t.Fatalf("InitRedis() error = %v", err)
 		}
-
-		CloseRedis()
+		if store == nil {
+			t.Fatal("InitRedis() 返回 nil")
+		}
+		if err := CloseRedis(); err != nil {
+			t.Fatalf("CloseRedis() error = %v", err)
+		}
 	})
 }
 
@@ -204,7 +210,7 @@ func TestIsDataExpired(t *testing.T) {
 
 	t.Run("数据新鲜", func(t *testing.T) {
 		freshData := model.ProcessedData{
-			Time:  time.Now().Format("2006-01-02 15:04:05"),
+			Time:  time.Now().In(shanghaiLocation).Format(timeFormat),
 			Items: []model.SiteItem{{SiteName: "测试", SiteID: "1", ID: 1}},
 		}
 		_ = store.SaveData(ctx, freshData)
@@ -237,10 +243,7 @@ func TestSaveSitesData(t *testing.T) {
 	sitesStore := setupTestStore(t, mr)
 	ctx := context.Background()
 
-	testData := map[string]interface{}{
-		"site1": map[string]string{"name": "站点1"},
-		"site2": map[string]string{"name": "站点2"},
-	}
+	testData := json.RawMessage(`{"site1":{"name":"站点1"},"site2":{"name":"站点2"}}`)
 
 	err := sitesStore.SaveSitesData(ctx, testData)
 	if err != nil {
@@ -260,13 +263,26 @@ func TestSaveSitesData(t *testing.T) {
 		t.Errorf("LoadSitesData() error = %v", err)
 	}
 
-	loadedMap, ok := loadedData.(map[string]interface{})
-	if !ok {
-		t.Fatal("LoadSitesData() 返回类型错误")
+	var loadedMap map[string]map[string]string
+	if err := json.Unmarshal(loadedData, &loadedMap); err != nil {
+		t.Fatalf("LoadSitesData() 解析失败: %v", err)
 	}
 
 	if len(loadedMap) != 2 {
 		t.Errorf("LoadSitesData() 返回 %d 条数据，期望 2 条", len(loadedMap))
+	}
+}
+
+func TestSaveSitesDataRejectsInvalidJSON(t *testing.T) {
+	mr := miniredis.RunT(t)
+	defer mr.Close()
+
+	sitesStore := setupTestStore(t, mr)
+	ctx := context.Background()
+
+	err := sitesStore.SaveSitesData(ctx, json.RawMessage(`{"broken":`))
+	if err == nil {
+		t.Fatal("SaveSitesData() 期望返回错误，但得到了 nil")
 	}
 }
 

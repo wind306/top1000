@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"top1000/internal/model"
 )
 
@@ -25,10 +26,10 @@ type DataStore interface {
 // 分离关注点，独立接口
 type SitesStore interface {
 	// LoadSitesData 加载站点数据
-	LoadSitesData(ctx context.Context) (any, error)
+	LoadSitesData(ctx context.Context) (json.RawMessage, error)
 
 	// SaveSitesData 保存站点数据
-	SaveSitesData(ctx context.Context, data any) error
+	SaveSitesData(ctx context.Context, data json.RawMessage) error
 
 	// SitesDataExists 检查站点数据是否存在
 	SitesDataExists(ctx context.Context) (bool, error)
