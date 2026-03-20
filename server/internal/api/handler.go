@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"top1000/internal/config"
 	"top1000/internal/crawler"
+	"top1000/internal/httpclient"
 	"top1000/internal/model"
 	"top1000/internal/storage"
 )
@@ -24,61 +24,102 @@ const (
 	defaultAPITimeout    = 15 * time.Second
 )
 
-// Go 1.26: 创建HTTP客户端的辅助函数，避免重复代码
-// 这个SB函数根据context和配置创建合适的HTTP客户端
-func createHTTPClient(ctx context.Context, timeout time.Duration) *http.Client {
-	cfg := config.Get()
-
-	// 根据context的deadline调整超时
-	actualTimeout := timeout
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
-			actualTimeout = remaining
-		}
-	}
-
-	client := &http.Client{Timeout: actualTimeout}
-
-	if cfg.InsecureSkipVerify {
-		client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
-	}
-
-	return client
-}
-
 // Handler API 处理器（依赖注入模式）
 type Handler struct {
 	store      storage.DataStore
 	sitesStore storage.SitesStore
 	lock       storage.UpdateLock
 	crawler    Crawler
+	sites      SitesFetcher
+	getConfig  func() *config.Config
 }
 
 // Crawler 爬虫接口（小而专注）
 // 定义爬虫的核心能力，方便测试和替换实现
 type Crawler interface {
-	// FetchTop1000WithContext 带 context 的数据爬取
-	FetchTop1000WithContext(ctx context.Context) (*model.ProcessedData, error)
+	// FetchWithContext 带 context 的数据爬取
+	FetchWithContext(ctx context.Context) (*model.ProcessedData, error)
+}
+
+// SitesFetcher 站点数据抓取接口
+type SitesFetcher interface {
+	FetchSitesData(ctx context.Context, sign string) (json.RawMessage, error)
 }
 
 // NewHandler 创建 Handler 实例（依赖注入）
 func NewHandler(store storage.DataStore, sitesStore storage.SitesStore, lock storage.UpdateLock) *Handler {
+	return newHandler(store, sitesStore, lock, crawler.NewFetcher(), &defaultSitesFetcher{getConfig: config.Get}, config.Get)
+}
+
+func newHandler(
+	store storage.DataStore,
+	sitesStore storage.SitesStore,
+	lock storage.UpdateLock,
+	crawler Crawler,
+	sites SitesFetcher,
+	getConfig func() *config.Config,
+) *Handler {
 	return &Handler{
 		store:      store,
 		sitesStore: sitesStore,
 		lock:       lock,
-		crawler:    &defaultCrawler{},
+		crawler:    crawler,
+		sites:      sites,
+		getConfig:  getConfig,
 	}
 }
 
-// defaultCrawler 默认爬虫实现（实现 Crawler 接口）
-type defaultCrawler struct{}
+type defaultSitesFetcher struct {
+	getConfig func() *config.Config
+}
 
-// FetchTop1000WithContext 调用底层爬虫
-func (d *defaultCrawler) FetchTop1000WithContext(ctx context.Context) (*model.ProcessedData, error) {
-	return crawler.FetchTop1000WithContext(ctx)
+func (f *defaultSitesFetcher) FetchSitesData(ctx context.Context, sign string) (json.RawMessage, error) {
+	apiURL, err := buildSitesAPIURL(sign)
+	if err != nil {
+		return nil, fmt.Errorf("解析基础URL失败: %w", err)
+	}
+
+	client := httpclient.New(ctx, 5*time.Second, f.getConfig().InsecureSkipVerify)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建HTTP请求失败: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("站点API返回错误状态码: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应失败: %w", err)
+	}
+
+	if !json.Valid(body) {
+		return nil, fmt.Errorf("解析JSON失败: invalid JSON payload")
+	}
+
+	return json.RawMessage(body), nil
+}
+
+func buildSitesAPIURL(sign string) (string, error) {
+	apiURL, err := url.Parse("https://api.iyuu.cn/index.php")
+	if err != nil {
+		return "", err
+	}
+
+	params := url.Values{}
+	params.Add("service", "App.Api.Sites")
+	params.Add("sign", sign)
+	params.Add("version", "2.0.0")
+	apiURL.RawQuery = params.Encode()
+
+	return apiURL.String(), nil
 }
 
 // RegisterRoutes 注册路由
@@ -89,15 +130,7 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 
 // ===== 以下改为 Handler 的方法 =====
 
-// GetTop1000Data 提供Top1000数据的API接口
-// @Summary 获取Top1000站点数据
-// @Description 获取Top1000站点列表数据，数据会自动更新（24小时过期）
-// @Tags Top1000
-// @Accept json
-// @Produce json
-// @Success 200 {object} model.ProcessedData
-// @Failure 500 {object} map[string]string "error": "无法加载数据"
-// @Router /top1000.json [get]
+// GetTop1000Data 提供 Top1000 数据接口。
 func (h *Handler) GetTop1000Data(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(c.Context(), defaultAPITimeout)
 	defer cancel()
@@ -133,55 +166,39 @@ func (h *Handler) shouldUpdateData(ctx context.Context) bool {
 // refreshData 刷新数据（带容错机制）
 // 返回 error 让调用者知道刷新是否成功
 func (h *Handler) refreshData(ctx context.Context) error {
-	// 防止并发更新
-	if h.lock.IsUpdating() {
-		log.Printf("[%s] 正在更新中，跳过", dataUpdateLogPrefix)
-		return nil
-	}
+	return withUpdateGuard(dataUpdateLogPrefix, h.lock.IsUpdating, h.lock.SetUpdating, func() error {
+		// 保存旧数据用于容错（传递context）
+		oldData, err := h.store.LoadData(ctx)
+		if err != nil {
+			log.Printf("[%s] 加载旧数据失败: %v", dataUpdateLogPrefix, err)
+			// 容错：旧数据不存在时继续爬取新数据
+		}
 
-	h.lock.SetUpdating(true)
-	defer h.lock.SetUpdating(false)
-
-	// 保存旧数据用于容错（传递context）
-	oldData, err := h.store.LoadData(ctx)
-	if err != nil {
-		log.Printf("[%s] 加载旧数据失败: %v", dataUpdateLogPrefix, err)
-		// 容错：旧数据不存在时继续爬取新数据
-	}
-
-	log.Printf("[%s] 开始爬取新数据...", dataUpdateLogPrefix)
-	newData, err := h.crawler.FetchTop1000WithContext(ctx)
-	if err != nil {
-		// 爬取失败，如果有旧数据则使用旧数据（容错）
-		if oldData != nil {
-			log.Printf("[%s] 爬取失败，使用旧数据: %v", dataUpdateLogPrefix, err)
+		log.Printf("[%s] 开始爬取新数据...", dataUpdateLogPrefix)
+		newData, err := h.crawler.FetchWithContext(ctx)
+		if err != nil {
+			// 爬取失败，如果有旧数据则使用旧数据（容错）
+			if oldData != nil {
+				log.Printf("[%s] 爬取失败，使用旧数据: %v", dataUpdateLogPrefix, err)
+				return err
+			}
+			log.Printf("[%s] 爬取失败且无旧数据: %v", dataUpdateLogPrefix, err)
 			return err
 		}
-		log.Printf("[%s] 爬取失败且无旧数据: %v", dataUpdateLogPrefix, err)
-		return err
-	}
 
-	if err := h.store.SaveData(ctx, *newData); err != nil {
-		log.Printf("[%s] 保存数据失败: %v", dataUpdateLogPrefix, err)
-		return err
-	}
+		if err := h.store.SaveData(ctx, *newData); err != nil {
+			log.Printf("[%s] 保存数据失败: %v", dataUpdateLogPrefix, err)
+			return err
+		}
 
-	log.Printf("[%s] 数据更新成功（%d 条）", dataUpdateLogPrefix, len(newData.Items))
-	return nil
+		log.Printf("[%s] 数据更新成功（%d 条）", dataUpdateLogPrefix, len(newData.Items))
+		return nil
+	})
 }
 
-// GetSitesData 提供IYUU站点数据的API接口
-// @Summary 获取IYUU站点列表
-// @Description 获取IYUU站点列表数据（需要配置IYUU_SIGN环境变量）
-// @Tags Sites
-// @Accept json
-// @Produce json
-// @Success 200 {object} interface{} "站点列表数据"
-// @Failure 502 {object} map[string]string "error": "未配置IYUU_SIGN环境变量"
-// @Failure 500 {object} map[string]string "error": "无法加载站点数据"
-// @Router /sites.json [get]
+// GetSitesData 提供 IYUU 站点数据接口。
 func (h *Handler) GetSitesData(c *fiber.Ctx) error {
-	cfg := config.Get()
+	cfg := h.getConfig()
 
 	if cfg.IYYUSign == "" {
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
@@ -220,61 +237,35 @@ func (h *Handler) shouldUpdateSitesData(ctx context.Context) bool {
 
 // refreshSitesData 刷新站点数据（带容错机制）
 // 返回 error 让调用者知道刷新是否成功
-// Go 1.26: 使用 createHTTPClient 辅助函数，DRY原则落地
 func (h *Handler) refreshSitesData(ctx context.Context, sign string) error {
-	// 防止并发更新
-	if h.lock.IsSitesUpdating() {
-		log.Printf("[%s] 正在更新中，跳过", sitesUpdateLogPrefix)
+	return withUpdateGuard(sitesUpdateLogPrefix, h.lock.IsSitesUpdating, h.lock.SetSitesUpdating, func() error {
+		log.Printf("[%s] 开始获取站点数据...", sitesUpdateLogPrefix)
+
+		result, err := h.sites.FetchSitesData(ctx, sign)
+		if err != nil {
+			log.Printf("[%s] 获取站点数据失败: %v", sitesUpdateLogPrefix, err)
+			return err
+		}
+
+		// 保存到存储（24小时TTL）
+		if err := h.sitesStore.SaveSitesData(ctx, result); err != nil {
+			log.Printf("[%s] 保存数据失败: %v", sitesUpdateLogPrefix, err)
+			return fmt.Errorf("保存数据失败: %w", err)
+		}
+
+		log.Printf("[%s] 站点数据更新成功", sitesUpdateLogPrefix)
+		return nil
+	})
+}
+
+func withUpdateGuard(logPrefix string, isUpdating func() bool, setUpdating func(bool), fn func() error) error {
+	if isUpdating() {
+		log.Printf("[%s] 正在更新中，跳过", logPrefix)
 		return nil
 	}
 
-	h.lock.SetSitesUpdating(true)
-	defer h.lock.SetSitesUpdating(false)
+	setUpdating(true)
+	defer setUpdating(false)
 
-	log.Printf("[%s] 开始获取站点数据...", sitesUpdateLogPrefix)
-
-	apiURL, err := url.Parse("https://api.iyuu.cn/index.php")
-	if err != nil {
-		log.Printf("[%s] 解析基础URL失败: %v", sitesUpdateLogPrefix, err)
-		return fmt.Errorf("解析基础URL失败: %w", err)
-	}
-	params := url.Values{}
-	params.Add("service", "App.Api.Sites")
-	params.Add("sign", sign)
-	params.Add("version", "2.0.0")
-	apiURL.RawQuery = params.Encode()
-
-	// Go 1.26: 使用辅助函数创建HTTP客户端
-	client := createHTTPClient(ctx, 5*time.Second)
-
-	resp, err := client.Get(apiURL.String())
-	if err != nil {
-		log.Printf("[%s] 请求失败: %v", sitesUpdateLogPrefix, err)
-		return fmt.Errorf("请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Go 1.26: io.ReadAll 性能已优化，分配更少内存
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("[%s] 读取响应失败: %v", sitesUpdateLogPrefix, err)
-		return fmt.Errorf("读取响应失败: %w", err)
-	}
-
-	// 解析JSON
-	var result any
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("[%s] 解析JSON失败: %v", sitesUpdateLogPrefix, err)
-		return fmt.Errorf("解析JSON失败: %w", err)
-	}
-
-	// 保存到存储（24小时TTL）
-	if err := h.sitesStore.SaveSitesData(ctx, result); err != nil {
-		log.Printf("[%s] 保存数据失败: %v", sitesUpdateLogPrefix, err)
-		return fmt.Errorf("保存数据失败: %w", err)
-	}
-
-	log.Printf("[%s] 站点数据更新成功", sitesUpdateLogPrefix)
-	return nil
+	return fn()
 }
-
