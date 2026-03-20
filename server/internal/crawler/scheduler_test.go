@@ -2,23 +2,219 @@ package crawler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"top1000/internal/config"
 	"top1000/internal/model"
 )
 
-func TestFetchTop1000WithContext(t *testing.T) {
-	t.Run("超时测试", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
-		defer cancel()
+const validTop1000Payload = `create time 2026-01-19 07:50:56 by xxx
 
-		_, err := FetchTop1000WithContext(ctx)
-		if err == nil {
-			t.Error("期望超时错误，但得到了 nil")
-		}
-	})
+站名：测试站点 【ID：123】
+重复度：85.5%
+文件大小：1.2TB
+`
+
+func TestFetcherFetchWithContext(t *testing.T) {
+	tests := []struct {
+		name        string
+		handler     http.HandlerFunc
+		timeout     time.Duration
+		wantErr     string
+		wantErrIs   error
+		wantItemCnt int
+	}{
+		{
+			name: "成功抓取并解析",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(validTop1000Payload))
+			},
+			timeout:     100 * time.Millisecond,
+			wantItemCnt: 1,
+		},
+		{
+			name: "上游返回非200",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "boom", http.StatusBadGateway)
+			},
+			timeout: 100 * time.Millisecond,
+			wantErr: "API返回错误状态码",
+		},
+		{
+			name: "响应内容非法",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("broken payload"))
+			},
+			timeout: 100 * time.Millisecond,
+			wantErr: "数据条目不能为空",
+		},
+		{
+			name: "请求超时会取消",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				time.Sleep(50 * time.Millisecond)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(validTop1000Payload))
+			},
+			timeout:   10 * time.Millisecond,
+			wantErrIs: ErrFetchingCancelled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(tt.handler)
+			defer server.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), tt.timeout)
+			defer cancel()
+
+			fetcher := newTestFetcher(server.URL)
+			data, err := fetcher.FetchWithContext(ctx)
+			if tt.wantErrIs != nil {
+				if !errors.Is(err, tt.wantErrIs) {
+					t.Fatalf("错误 = %v, want errors.Is(..., %v)", err, tt.wantErrIs)
+				}
+				return
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("错误 = %v, want contains %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("FetchWithContext() 返回错误: %v", err)
+			}
+			if len(data.Items) != tt.wantItemCnt {
+				t.Fatalf("Items 数量 = %d, want %d", len(data.Items), tt.wantItemCnt)
+			}
+			if data.Items[0].SiteName != "测试站点" {
+				t.Fatalf("SiteName = %s, want 测试站点", data.Items[0].SiteName)
+			}
+		})
+	}
+}
+
+func TestFetcherReturnsTaskRunningWhenLockHeld(t *testing.T) {
+	lock := &stubLock{locked: true}
+	fetcher := newTestFetcher("http://example.com")
+	fetcher.lock = lock
+
+	_, err := fetcher.FetchWithContext(context.Background())
+	if !errors.Is(err, ErrTaskRunning) {
+		t.Fatalf("错误 = %v, want %v", err, ErrTaskRunning)
+	}
+}
+
+func TestFetcherPreloadDataSavesFetchedData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(validTop1000Payload))
+	}))
+	defer server.Close()
+
+	store := &stubDataStore{exists: false}
+	fetcher := newTestFetcher(server.URL)
+	fetcher.PreloadData(context.Background(), store)
+
+	if store.saveCalls != 1 {
+		t.Fatalf("SaveData 调用次数 = %d, want 1", store.saveCalls)
+	}
+	if store.saved == nil || len(store.saved.Items) != 1 {
+		t.Fatalf("保存的数据不正确: %+v", store.saved)
+	}
+}
+
+func TestCheckDataLoadRequired(t *testing.T) {
+	tests := []struct {
+		name  string
+		store *stubDataStore
+		want  bool
+	}{
+		{
+			name: "数据不存在时需要加载",
+			store: &stubDataStore{
+				exists: false,
+			},
+			want: true,
+		},
+		{
+			name: "数据新鲜时不需要加载",
+			store: &stubDataStore{
+				exists:  true,
+				expired: false,
+			},
+			want: false,
+		},
+		{
+			name: "数据过期时需要加载",
+			store: &stubDataStore{
+				exists:  true,
+				expired: true,
+			},
+			want: true,
+		},
+		{
+			name: "检查存在性失败时需要加载",
+			store: &stubDataStore{
+				existsErr: errors.New("exists failed"),
+			},
+			want: true,
+		},
+		{
+			name: "检查过期失败时需要加载",
+			store: &stubDataStore{
+				exists:     true,
+				expiredErr: errors.New("expired failed"),
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := checkDataLoadRequired(context.Background(), tt.store); got != tt.want {
+				t.Fatalf("checkDataLoadRequired() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFetcherUsesSingleFlightLock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(30 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(validTop1000Payload))
+	}))
+	defer server.Close()
+
+	lock := &stubLock{}
+	fetcher := newTestFetcher(server.URL)
+	fetcher.lock = lock
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := fetcher.FetchWithContext(context.Background())
+		errCh <- err
+	}()
+	go func() {
+		_, err := fetcher.FetchWithContext(context.Background())
+		errCh <- err
+	}()
+
+	err1 := <-errCh
+	err2 := <-errCh
+	if !oneOf(err1, err2, nil, ErrTaskRunning) {
+		t.Fatalf("并发结果异常: err1=%v err2=%v", err1, err2)
+	}
 }
 
 func TestParseResponse(t *testing.T) {
@@ -30,13 +226,8 @@ func TestParseResponse(t *testing.T) {
 		check     func([]model.SiteItem) error
 	}{
 		{
-			name: "标准格式",
-			rawData: `create time 2026-01-19 07:50:56 by xxx
-
-站名：测试站点 【ID：123】
-重复度：85.5%
-文件大小：1.2TB
-`,
+			name:      "标准格式",
+			rawData:   validTop1000Payload,
 			wantCount: 1,
 			wantTime:  "2026-01-19 07:50:56",
 			check: func(items []model.SiteItem) error {
@@ -119,9 +310,9 @@ func TestParseResponse(t *testing.T) {
 
 func TestExtractFieldValue(t *testing.T) {
 	tests := []struct {
-		name  string
-		line  string
-		want  string
+		name string
+		line string
+		want string
 	}{
 		{
 			name: "标准格式",
@@ -151,9 +342,9 @@ func TestExtractFieldValue(t *testing.T) {
 
 func TestExtractTime(t *testing.T) {
 	tests := []struct {
-		name  string
-		raw   string
-		want  string
+		name string
+		raw  string
+		want string
 	}{
 		{
 			name: "标准格式",
@@ -166,9 +357,9 @@ func TestExtractTime(t *testing.T) {
 			want: "2026-01-19 07:50:56",
 		},
 		{
-			name:  "空字符串",
-			raw:   "",
-			want:  "",
+			name: "空字符串",
+			raw:  "",
+			want: "",
 		},
 	}
 
@@ -213,58 +404,88 @@ func TestNormalizeLineEndings(t *testing.T) {
 	}
 }
 
-func TestTaskMutex(t *testing.T) {
-	t.Run("防止并发执行", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(100 * time.Millisecond)
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`create time 2026-01-19 07:50:56 by xxx
-
-站名：测试站点 【ID：123】
-重复度：85.5%
-文件大小：1.2TB
-`))
-		}))
-		defer server.Close()
-
-		ctx := context.Background()
-		errChan := make(chan error, 2)
-
-		go func() {
-			_, err := FetchTop1000WithContext(ctx)
-			errChan <- err
-		}()
-
-		go func() {
-			_, err := FetchTop1000WithContext(ctx)
-			errChan <- err
-		}()
-
-		err1 := <-errChan
-		err2 := <-errChan
-
-		successCount := 0
-		if err1 == nil {
-			successCount++
-		}
-		if err2 == nil {
-			successCount++
-		}
-
-		if successCount != 1 {
-			t.Errorf("期望只有一个任务成功，实际有 %d 个成功", successCount)
-		}
-	})
+func newTestFetcher(apiURL string) *Fetcher {
+	return &Fetcher{
+		apiURL:        apiURL,
+		timeout:       100 * time.Millisecond,
+		maxRetries:    1,
+		retryInterval: time.Millisecond,
+		lock:          &stubLock{},
+		getConfig:     func() *config.Config { return &config.Config{} },
+		newClient:     httpclientFactory,
+	}
 }
 
-func TestContextTimeout(t *testing.T) {
-	t.Run("超时取消", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
+func httpclientFactory(ctx context.Context, timeout time.Duration, insecureSkipVerify bool) *http.Client {
+	return &http.Client{Timeout: timeout}
+}
 
-		_, err := FetchTop1000WithContext(ctx)
-		if err == nil {
-			t.Error("期望超时错误，但得到了 nil")
+type stubLock struct {
+	mu     sync.Mutex
+	locked bool
+}
+
+func (s *stubLock) TryLock() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.locked {
+		return false
+	}
+	s.locked = true
+	return true
+}
+
+func (s *stubLock) Unlock() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.locked = false
+}
+
+type stubDataStore struct {
+	saved      *model.ProcessedData
+	saveErr    error
+	saveCalls  int
+	exists     bool
+	existsErr  error
+	expired    bool
+	expiredErr error
+}
+
+func (s *stubDataStore) LoadData(context.Context) (*model.ProcessedData, error) {
+	return s.saved, nil
+}
+
+func (s *stubDataStore) SaveData(_ context.Context, data model.ProcessedData) error {
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	s.saveCalls++
+	dataCopy := data
+	s.saved = &dataCopy
+	s.exists = true
+	return nil
+}
+
+func (s *stubDataStore) DataExists(context.Context) (bool, error) {
+	if s.existsErr != nil {
+		return false, s.existsErr
+	}
+	return s.exists, nil
+}
+
+func (s *stubDataStore) IsDataExpired(context.Context) (bool, error) {
+	if s.expiredErr != nil {
+		return false, s.expiredErr
+	}
+	return s.expired, nil
+}
+
+func oneOf(err1, err2 error, want1, want2 error) bool {
+	matches := func(err, want error) bool {
+		if want == nil {
+			return err == nil
 		}
-	})
+		return errors.Is(err, want)
+	}
+	return (matches(err1, want1) && matches(err2, want2)) || (matches(err1, want2) && matches(err2, want1))
 }

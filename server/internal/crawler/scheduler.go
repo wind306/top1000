@@ -2,7 +2,6 @@ package crawler
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -13,22 +12,23 @@ import (
 	"sync"
 	"time"
 	"top1000/internal/config"
+	"top1000/internal/httpclient"
 	"top1000/internal/model"
 	"top1000/internal/storage"
 )
 
 const (
-	logPrefix       = "爬虫"
-	httpTimeout     = 10 * time.Second
-	maxRetries      = 1
-	retryInterval   = 1 * time.Second
-	linesPerItem    = 3
-	timeLineIndex   = 0
-	dataStartLine   = 2
-	timePrefix      = "create time "
-	timeSuffix      = " by "
-	fieldSeparator  = "："
-	sitePattern     = `站名：(.*?) 【ID：(\d+)】`
+	logPrefix      = "爬虫"
+	httpTimeout    = 10 * time.Second
+	maxRetries     = 1
+	retryInterval  = 1 * time.Second
+	linesPerItem   = 3
+	timeLineIndex  = 0
+	dataStartLine  = 2
+	timePrefix     = "create time "
+	timeSuffix     = " by "
+	fieldSeparator = "："
+	sitePattern    = `站名：(.*?) 【ID：(\d+)】`
 )
 
 var (
@@ -39,42 +39,44 @@ var (
 	ErrTaskRunning       = errors.New("任务正在执行中")
 )
 
-// Go 1.26: 创建HTTP客户端的辅助函数
-func createHTTPClient(ctx context.Context, cfg *config.Config) *http.Client {
-	timeout := httpTimeout
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
-			timeout = remaining
-		}
-	}
-
-	client := &http.Client{Timeout: timeout}
-	if cfg.InsecureSkipVerify {
-		client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
-	}
-
-	return client
+type tryLocker interface {
+	TryLock() bool
+	Unlock()
 }
 
-// FetchTop1000 从IYUU获取数据并返回
-func FetchTop1000() (*model.ProcessedData, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
-	defer cancel()
-	return FetchTop1000WithContext(ctx)
+// Fetcher 封装 Top1000 抓取依赖，方便测试替换。
+type Fetcher struct {
+	apiURL        string
+	timeout       time.Duration
+	maxRetries    int
+	retryInterval time.Duration
+	lock          tryLocker
+	getConfig     func() *config.Config
+	newClient     func(context.Context, time.Duration, bool) *http.Client
 }
 
-// FetchTop1000WithContext 从IYUU获取数据并返回
-// Go 1.26: 使用哨兵错误，方便 errors.Is 检查
-func FetchTop1000WithContext(ctx context.Context) (*model.ProcessedData, error) {
-	if !taskMutex.TryLock() {
+// NewFetcher 创建默认抓取器。
+func NewFetcher() *Fetcher {
+	return &Fetcher{
+		apiURL:        config.DefaultAPIURL,
+		timeout:       httpTimeout,
+		maxRetries:    maxRetries,
+		retryInterval: retryInterval,
+		lock:          &taskMutex,
+		getConfig:     config.Get,
+		newClient:     httpclient.New,
+	}
+}
+
+// FetchWithContext 使用配置好的抓取器获取数据。
+func (f *Fetcher) FetchWithContext(ctx context.Context) (*model.ProcessedData, error) {
+	if !f.lock.TryLock() {
 		return nil, ErrTaskRunning
 	}
-	defer taskMutex.Unlock()
+	defer f.lock.Unlock()
 
 	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := 0; attempt < f.maxRetries; attempt++ {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%w: %v", ErrFetchingCancelled, ctx.Err())
 		}
@@ -85,11 +87,11 @@ func FetchTop1000WithContext(ctx context.Context) (*model.ProcessedData, error) 
 			select {
 			case <-ctx.Done():
 				return nil, fmt.Errorf("%w: %v", ErrFetchingCancelled, ctx.Err())
-			case <-time.After(retryInterval):
+			case <-time.After(f.retryInterval):
 			}
 		}
 
-		data, err := doFetchWithContext(ctx)
+		data, err := f.doFetchWithContext(ctx)
 		if err == nil {
 			return data, nil
 		}
@@ -101,19 +103,20 @@ func FetchTop1000WithContext(ctx context.Context) (*model.ProcessedData, error) 
 }
 
 // doFetchWithContext 执行HTTP请求获取数据
-// Go 1.26: 使用 createHTTPClient 辅助函数，io.ReadAll 性能已优化
-func doFetchWithContext(ctx context.Context) (*model.ProcessedData, error) {
+func (f *Fetcher) doFetchWithContext(ctx context.Context) (*model.ProcessedData, error) {
 	log.Printf("[%s] 开始爬取IYUU数据...", logPrefix)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, config.DefaultAPIURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("创建HTTP请求失败: %w", err)
 	}
 
-	// Go 1.26: 使用辅助函数创建HTTP客户端，传递正确的超时参数
-	client := createHTTPClient(ctx, config.Get())
+	client := f.newClient(ctx, f.timeout, f.getConfig().InsecureSkipVerify)
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: %v", ErrFetchingCancelled, ctx.Err())
+		}
 		return nil, fmt.Errorf("获取数据失败: %w", err)
 	}
 	defer resp.Body.Close()
@@ -207,9 +210,9 @@ func parseItemGroup(group []string) (model.SiteItem, bool) {
 
 // extractFieldValue 从"字段名：值"格式中提取值
 func extractFieldValue(line string) string {
-	parts := strings.Split(line, fieldSeparator)
-	if len(parts) > 1 {
-		return strings.TrimSpace(parts[1])
+	_, value, ok := strings.Cut(line, fieldSeparator)
+	if ok {
+		return strings.TrimSpace(value)
 	}
 	return ""
 }
@@ -228,44 +231,30 @@ func logParsingWarnings(dataLines []string, skippedCount int) {
 // extractTime 提取时间字符串，去除前缀和后缀
 func extractTime(rawTime string) string {
 	rawTime = strings.TrimPrefix(rawTime, timePrefix)
-	if idx := strings.Index(rawTime, timeSuffix); idx != -1 {
-		rawTime = rawTime[:idx]
+	if value, _, ok := strings.Cut(rawTime, timeSuffix); ok {
+		return value
 	}
 	return rawTime
 }
 
 // PreloadData 启动时预加载数据
-func PreloadData() {
+func PreloadData(store storage.DataStore) {
 	log.Println("[爬虫] 检查是否需要预加载数据...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
 	defer cancel()
 
-	if !checkDataLoadRequired(ctx) {
+	if !checkDataLoadRequired(ctx, store) {
 		log.Println("[爬虫] Redis中已有新鲜数据，无需预加载")
 		return
 	}
 
 	log.Println("[爬虫] Redis中无数据或数据过期，开始预加载...")
-	data, err := FetchTop1000WithContext(ctx)
-	if err != nil {
-		log.Printf("[爬虫] 预加载失败: %v", err)
-		log.Printf("[爬虫] 提示：首次访问时会自动重试获取数据")
-		return
-	}
-
-	store := storage.GetDefaultStore()
-	if err := store.SaveData(ctx, *data); err != nil {
-		log.Printf("[爬虫] 保存预加载数据失败: %v", err)
-		return
-	}
-
-	log.Printf("[爬虫] 预加载成功，已存入Redis（共 %d 条记录）", len(data.Items))
+	NewFetcher().PreloadData(ctx, store)
 }
 
 // checkDataLoadRequired 检查是否需要加载数据
-func checkDataLoadRequired(ctx context.Context) bool {
-	store := storage.GetDefaultStore()
+func checkDataLoadRequired(ctx context.Context, store storage.DataStore) bool {
 	exists, err := store.DataExists(ctx)
 	if err != nil || !exists {
 		if err != nil {
@@ -281,4 +270,21 @@ func checkDataLoadRequired(ctx context.Context) bool {
 	}
 
 	return isExpired
+}
+
+// PreloadData 预加载数据到指定 store。
+func (f *Fetcher) PreloadData(ctx context.Context, store storage.DataStore) {
+	data, err := f.FetchWithContext(ctx)
+	if err != nil {
+		log.Printf("[爬虫] 预加载失败: %v", err)
+		log.Printf("[爬虫] 提示：首次访问时会自动重试获取数据")
+		return
+	}
+
+	if err := store.SaveData(ctx, *data); err != nil {
+		log.Printf("[爬虫] 保存预加载数据失败: %v", err)
+		return
+	}
+
+	log.Printf("[爬虫] 预加载成功，已存入Redis（共 %d 条记录）", len(data.Items))
 }
