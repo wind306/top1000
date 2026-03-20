@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -115,9 +116,9 @@ func TestLoad(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	tests := []struct {
-		name       string
-		setup      func() func()
-		wantErr    bool
+		name        string
+		setup       func() func()
+		wantErr     bool
 		errContains string
 	}{
 		{
@@ -143,7 +144,7 @@ func TestValidate(t *testing.T) {
 				})
 				return func() { resetConfig() }
 			},
-			wantErr:    true,
+			wantErr:     true,
 			errContains: "REDIS_ADDR",
 		},
 		{
@@ -156,7 +157,7 @@ func TestValidate(t *testing.T) {
 				})
 				return func() { resetConfig() }
 			},
-			wantErr:    true,
+			wantErr:     true,
 			errContains: "REDIS_PASSWORD",
 		},
 		{
@@ -169,7 +170,7 @@ func TestValidate(t *testing.T) {
 				})
 				return func() { resetConfig() }
 			},
-			wantErr:    true,
+			wantErr:     true,
 			errContains: "REDIS_ADDR",
 		},
 	}
@@ -185,7 +186,7 @@ func TestValidate(t *testing.T) {
 				return
 			}
 			if err != nil && tt.errContains != "" {
-				if !containsString(err.Error(), tt.errContains) {
+				if !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("Validate() error = %v, 期望包含 %v", err, tt.errContains)
 				}
 			}
@@ -210,45 +211,6 @@ func TestGet(t *testing.T) {
 			t.Error("Get() 未遵循单例模式，返回了不同实例")
 		}
 	})
-}
-
-func TestGetEnv(t *testing.T) {
-	tests := []struct {
-		name         string
-		key          string
-		defaultValue string
-		setup        func() func()
-		want         string
-	}{
-		{
-			name:         "环境变量存在",
-			key:          "TEST_VAR",
-			defaultValue: "default",
-			setup: func() func() {
-				os.Setenv("TEST_VAR", "value")
-				return func() { os.Unsetenv("TEST_VAR") }
-			},
-			want: "value",
-		},
-		{
-			name:         "环境变量不存在，返回默认值",
-			key:          "TEST_VAR",
-			defaultValue: "default",
-			setup:        func() func() { return func() {} },
-			want:         "default",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cleanup := tt.setup()
-			defer cleanup()
-
-			if got := getEnv(tt.key, tt.defaultValue); got != tt.want {
-				t.Errorf("getEnv() = %v, want %v", got, tt.want)
-			}
-		})
-	}
 }
 
 // TestGetEnvGeneric 测试泛型环境变量解析函数（Go 1.26）
@@ -304,17 +266,4 @@ func TestGetEnvGeneric(t *testing.T) {
 			}
 		})
 	}
-}
-
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && findSubstr(s, substr)
-}
-
-func findSubstr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

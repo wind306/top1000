@@ -30,14 +30,14 @@ func getEnvGeneric[T any](key string, defaultValue T, parser envParser[T]) T {
 
 // 默认值常量
 const (
-	DefaultPort         = "7066"
-	DefaultWebDistDir   = "./web-dist"
-	DefaultAPIURL       = "https://api.iyuu.cn/top1000.php"
-	DefaultDataExpire   = 24 * time.Hour // 数据过期检测阈值
-	DefaultRedisDB      = 0              // Redis数据库编号
-	DefaultRedisKey     = "top1000:data" // Redis key（Top1000数据）
-	DefaultSitesKey     = "top1000:sites" // Redis key（站点数据）
-	DefaultSitesExpire  = 24 * time.Hour // 站点数据过期时间
+	DefaultPort        = "7066"
+	DefaultWebDistDir  = "./web-dist"
+	DefaultAPIURL      = "https://api.iyuu.cn/top1000.php"
+	DefaultDataExpire  = 24 * time.Hour  // 数据过期检测阈值
+	DefaultRedisDB     = 0               // Redis数据库编号
+	DefaultRedisKey    = "top1000:data"  // Redis key（Top1000数据）
+	DefaultSitesKey    = "top1000:sites" // Redis key（站点数据）
+	DefaultSitesExpire = 24 * time.Hour  // 站点数据过期时间
 )
 
 // Config 应用程序配置（只保留必须从环境变量读取的配置）
@@ -59,14 +59,14 @@ var (
 func Load() *Config {
 	initOnce.Do(func() {
 		cfg := &Config{
-			RedisAddr:          getEnv("REDIS_ADDR", ""),
-			RedisPassword:      getEnv("REDIS_PASSWORD", ""),
+			RedisAddr:     os.Getenv("REDIS_ADDR"),
+			RedisPassword: os.Getenv("REDIS_PASSWORD"),
 			// Go 1.26 泛型优化：使用统一的 getEnvGeneric
-			RedisDB:            getEnvGeneric("REDIS_DB", DefaultRedisDB, func(s string) (int, bool) {
+			RedisDB: getEnvGeneric("REDIS_DB", DefaultRedisDB, func(s string) (int, bool) {
 				i, err := strconv.Atoi(s)
 				return i, err == nil
 			}),
-			IYYUSign: getEnv("IYUU_SIGN", ""),
+			IYYUSign: os.Getenv("IYUU_SIGN"),
 			InsecureSkipVerify: getEnvGeneric("INSECURE_SKIP_VERIFY", false, func(s string) (bool, bool) {
 				// 支持 true/false, 1/0, yes/no
 				return s == "true" || s == "1" || s == "yes", true
@@ -87,29 +87,19 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("配置验证失败: %s", strings.Join(e.errors, "、"))
 }
 
-// Add 添加验证错误
-func (e *ValidationError) Add(field string) {
-	e.errors = append(e.errors, field)
-}
-
-// IsValid 检查是否有错误
-func (e *ValidationError) IsValid() bool {
-	return len(e.errors) == 0
-}
-
 // Validate 验证配置的有效性（返回所有错误）
 func Validate() error {
 	cfg := Get()
 	var errs ValidationError
 
 	if cfg.RedisAddr == "" {
-		errs.Add("REDIS_ADDR")
+		errs.errors = append(errs.errors, "REDIS_ADDR")
 	}
 	if cfg.RedisPassword == "" {
-		errs.Add("REDIS_PASSWORD")
+		errs.errors = append(errs.errors, "REDIS_PASSWORD")
 	}
 
-	if !errs.IsValid() {
+	if len(errs.errors) > 0 {
 		return &errs
 	}
 	return nil
@@ -118,12 +108,4 @@ func Validate() error {
 // Get 获取配置实例（并发安全）
 func Get() *Config {
 	return Load()
-}
-
-// getEnv 获取环境变量，如果不存在则返回默认值
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }
