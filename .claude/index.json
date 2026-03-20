@@ -5,7 +5,7 @@
     "name": "top1000",
     "description": "千站排行榜项目 - 站点数据采集与可视化",
     "techStack": {
-      "backend": ["Go 1.25", "Fiber", "Redis"],
+      "backend": ["Go 1.26", "Fiber", "Redis"],
       "frontend": ["TypeScript", "Vite", "AG Grid"],
       "deployment": ["Docker", "Multi-stage build"]
     }

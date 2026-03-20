@@ -53,7 +53,7 @@ Top1000 项目文档导航。
 
 ## 外部资源
 
-- [Go 1.25 文档](https://go.dev/doc/)
+- [Go 1.26 文档](https://go.dev/doc/)
 - [Fiber 框架](https://docs.gofiber.io/)
 - [Redis 文档](https://redis.io/docs/)
 - [Vite 文档](https://vitejs.dev/)

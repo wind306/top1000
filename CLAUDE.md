@@ -7,7 +7,7 @@
 Top1000 是一个千站排行榜项目，提供站点数据的实时采集、存储和可视化展示。
 
 **技术栈**：
-- 后端：Go 1.25 + Fiber Web框架 + Redis存储
+- 后端：Go 1.26 + Fiber Web框架 + Redis存储
 - 前端：TypeScript + Vite + AG Grid 数据表格
 - 部署：Docker（多阶段构建，最终镜像 4-5MB）
 
@@ -83,7 +83,7 @@ graph TD
 ## 快速启动
 
 ### 环境要求
-- Go 1.25+
+- Go 1.26+
 - Node.js 24+
 - pnpm 10+
 - Redis
