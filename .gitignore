@@ -52,3 +52,5 @@ main
 .env.production
 web/dist
 **/.omc
+.claude/skills
+.omx
