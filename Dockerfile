@@ -26,7 +26,6 @@ RUN echo "📦 下载 Go 依赖..." && \
 # 复制源代码（从 server 目录）
 COPY server/cmd ./cmd
 COPY server/internal ./internal
-COPY server/docs ./docs
 
 # 安装 UPX 压缩工具
 RUN echo "🔧 安装 UPX 压缩工具..." && \

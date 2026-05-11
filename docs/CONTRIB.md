@@ -323,7 +323,6 @@ open http://localhost:7066/swagger/
 
 - [部署文档](./DEPLOYMENT.md)
 - [项目根文档](../CLAUDE.md)
-- [API 文档](../server/docs/)
 
 ## 许可证
 
