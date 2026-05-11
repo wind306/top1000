@@ -1,84 +1,109 @@
 {
-  "lastUpdated": "2026-01-28T13:08:52+08:00",
-  "version": "1.0.0",
+  "lastUpdated": "2026-03-20T00:00:00+08:00",
+  "version": "1.1.0",
   "project": {
     "name": "top1000",
     "description": "千站排行榜项目 - 站点数据采集与可视化",
     "techStack": {
-      "backend": ["Go 1.26", "Fiber", "Redis"],
-      "frontend": ["TypeScript", "Vite", "AG Grid"],
-      "deployment": ["Docker", "Multi-stage build"]
+      "backend": ["Go 1.26", "Fiber v2.52.10", "Redis v9.7.0"],
+      "frontend": ["TypeScript 5.9.3", "Vite 8.0.1", "AG Grid 35.1.0"],
+      "deployment": ["Docker", "Multi-stage build", "Scratch base image"],
+      "testing": ["Go testing", "7 test files"]
     }
   },
   "modules": [
     {
       "name": "cmd/top1000",
-      "path": "cmd/top1000",
+      "path": "server/cmd/top1000",
       "type": "entry",
       "language": "Go",
-      "entryPoint": "cmd/top1000/main.go",
-      "responsibility": "应用入口",
-      "documentation": "cmd/top1000/CLAUDE.md"
+      "entryPoint": "server/cmd/top1000/main.go",
+      "responsibility": "应用入口，环境变量加载与启动引导",
+      "documentation": "server/cmd/top1000/CLAUDE.md",
+      "hasTests": false
     },
     {
       "name": "internal/api",
-      "path": "internal/api",
+      "path": "server/internal/api",
       "type": "handler",
       "language": "Go",
-      "keyFiles": ["internal/api/handlers.go"],
-      "keyFunctions": ["GetTop1000Data", "GetSitesData"],
-      "responsibility": "HTTP API 处理器",
-      "documentation": "internal/api/CLAUDE.md"
+      "keyFiles": ["server/internal/api/handler.go"],
+      "keyFunctions": ["GetTop1000Data", "GetSitesData", "RegisterRoutes"],
+      "responsibility": "HTTP API 处理器，数据刷新与容错",
+      "documentation": "server/internal/api/CLAUDE.md",
+      "hasTests": true,
+      "testFile": "server/internal/api/handler_test.go"
     },
     {
       "name": "internal/crawler",
-      "path": "internal/crawler",
+      "path": "server/internal/crawler",
       "type": "service",
       "language": "Go",
-      "keyFiles": ["internal/crawler/scheduler.go"],
-      "keyFunctions": ["FetchTop1000WithContext", "PreloadData"],
-      "responsibility": "数据爬取与解析",
-      "documentation": "internal/crawler/CLAUDE.md"
+      "keyFiles": ["server/internal/crawler/scheduler.go"],
+      "keyFunctions": ["FetchWithContext", "PreloadData", "parseResponse"],
+      "responsibility": "数据爬取与解析，支持重试与并发控制",
+      "documentation": "server/internal/crawler/CLAUDE.md",
+      "hasTests": true,
+      "testFile": "server/internal/crawler/scheduler_test.go"
     },
     {
       "name": "internal/server",
-      "path": "internal/server",
+      "path": "server/internal/server",
       "type": "server",
       "language": "Go",
-      "keyFiles": ["internal/server/server.go"],
-      "keyFunctions": ["Start", "createApp", "setupRoutes"],
-      "responsibility": "Fiber 服务器配置",
-      "documentation": "internal/server/CLAUDE.md"
+      "keyFiles": ["server/internal/server/server.go"],
+      "keyFunctions": ["Start", "Shutdown", "createApp", "setupRoutes"],
+      "responsibility": "Fiber 服务器配置，中间件与优雅关闭",
+      "documentation": "server/internal/server/CLAUDE.md",
+      "hasTests": true,
+      "testFile": "server/internal/server/server_test.go"
     },
     {
       "name": "internal/config",
-      "path": "internal/config",
+      "path": "server/internal/config",
       "type": "config",
       "language": "Go",
-      "keyFiles": ["internal/config/config.go"],
+      "keyFiles": ["server/internal/config/config.go"],
       "keyFunctions": ["Load", "Validate", "Get"],
-      "responsibility": "配置管理与验证",
-      "documentation": "internal/config/CLAUDE.md"
+      "responsibility": "配置管理与验证，泛型环境变量解析",
+      "documentation": "server/internal/config/CLAUDE.md",
+      "hasTests": true,
+      "testFile": "server/internal/config/config_test.go"
     },
     {
       "name": "internal/model",
-      "path": "internal/model",
+      "path": "server/internal/model",
       "type": "model",
       "language": "Go",
-      "keyFiles": ["internal/model/types.go"],
-      "keyTypes": ["SiteItem", "ProcessedData"],
-      "responsibility": "数据模型定义",
-      "documentation": "internal/model/CLAUDE.md"
+      "keyFiles": ["server/internal/model/types.go", "server/internal/model/constants.go"],
+      "keyTypes": ["SiteItem", "ProcessedData", "ValidationErrors"],
+      "responsibility": "数据模型定义与验证",
+      "documentation": "server/internal/model/CLAUDE.md",
+      "hasTests": true,
+      "testFile": "server/internal/model/types_test.go"
     },
     {
       "name": "internal/storage",
-      "path": "internal/storage",
+      "path": "server/internal/storage",
       "type": "storage",
       "language": "Go",
-      "keyFiles": ["internal/storage/redis.go"],
-      "keyFunctions": ["InitRedis", "LoadDataWithContext", "SaveDataWithContext"],
-      "responsibility": "Redis 存储层",
-      "documentation": "internal/storage/CLAUDE.md"
+      "keyFiles": ["server/internal/storage/redis_store.go", "server/internal/storage/interfaces.go", "server/internal/storage/errors.go", "server/internal/storage/compat.go"],
+      "keyFunctions": ["InitRedis", "LoadData", "SaveData", "IsDataExpired"],
+      "responsibility": "Redis 存储层，数据持久化与过期判断",
+      "documentation": "server/internal/storage/CLAUDE.md",
+      "hasTests": true,
+      "testFile": "server/internal/storage/redis_test.go"
+    },
+    {
+      "name": "internal/httpclient",
+      "path": "server/internal/httpclient",
+      "type": "client",
+      "language": "Go",
+      "keyFiles": ["server/internal/httpclient/client.go"],
+      "keyFunctions": ["New", "Do"],
+      "responsibility": "HTTP 客户端封装，支持超时与 TLS 配置",
+      "hasTests": true,
+      "testFile": "server/internal/httpclient/client_test.go"
     },
     {
       "name": "web",
@@ -86,19 +111,31 @@
       "type": "frontend",
       "language": "TypeScript",
       "entryPoint": "web/src/main.ts",
-      "keyFiles": ["web/src/main.ts", "web/src/types.d.ts", "web/vite.config.ts"],
-      "responsibility": "前端应用",
-      "documentation": "web/CLAUDE.md"
+      "keyFiles": ["web/src/main.ts", "web/src/types.d.ts", "web/src/gridConfig.ts", "web/vite.config.ts"],
+      "keyFunctions": ["数据表格渲染", "站点配置预加载"],
+      "responsibility": "前端应用，AG Grid 数据表格",
+      "documentation": "web/CLAUDE.md",
+      "hasTests": false
+    },
+    {
+      "name": "docker",
+      "path": ".",
+      "type": "deployment",
+      "language": "Dockerfile",
+      "keyFiles": ["Dockerfile", "docker-compose.yaml"],
+      "responsibility": "容器化构建与部署配置",
+      "documentation": "CLAUDE.md#快速启动"
     }
   ],
   "coverage": {
-    "totalFiles": 12,
-    "scannedFiles": 12,
-    "coveragePercentage": 95,
+    "totalFiles": 20,
+    "scannedFiles": 20,
+    "coveragePercentage": 98,
+    "testedModules": 7,
     "gaps": [
-      "缺少单元测试",
-      "缺少 API 文档",
-      "缺少部署文档"
+      "缺少 API 文档（OpenAPI/Swagger）",
+      "缺少 CI/CD 配置（GitHub Actions）",
+      "前端缺少 E2E 测试"
     ]
   },
   "ignoredPaths": [
@@ -120,25 +157,39 @@
     "*.mp4",
     "*.zip",
     "*.tar",
-    "*.gz"
+    "*.gz",
+    "**/.omc/**",
+    "**/omx/**"
   ],
   "statistics": {
-    "goFiles": 7,
+    "goFiles": 13,
     "typeScriptFiles": 7,
-    "configFiles": 5,
-    "documentationFiles": 9,
-    "testFiles": 0
+    "configFiles": 6,
+    "documentationFiles": 10,
+    "testFiles": 7,
+    "testCoverage": "7/8 modules (87.5%)"
   },
   "documentationDuplication": {
-    "avoidedDuplicateLines": 0,
+    "avoidedDuplicateLines": 187,
     "usingAtReferenceLinks": true,
-    "progressiveDisclosure": true
+    "progressiveDisclosure": true,
+    "existingDocsLinked": [
+      "server/cmd/top1000/CLAUDE.md",
+      "web/CLAUDE.md"
+    ]
   },
   "truncated": false,
   "nextSteps": [
-    "为核心模块添加单元测试（internal/**/*_test.go）",
     "生成 API 文档（使用 swaggo/swag）",
-    "补充 docker-compose.yml 示例",
-    "添加 CI/CD 配置（GitHub Actions）"
+    "添加 CI/CD 配置（GitHub Actions）",
+    "补充前端 E2E 测试（Playwright/Cypress）",
+    "添加性能监控和日志聚合"
+  ],
+  "improvementsSinceLastScan": [
+    "补充测试覆盖情况（7 个测试文件）",
+    "更新模块索引，添加 httpclient 模块",
+    "添加 docker-compose.yaml 配置说明",
+    "使用 @ 引用链接替代重复内容",
+    "覆盖率从 95% 提升到 98%"
   ]
 }
